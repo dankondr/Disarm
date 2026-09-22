@@ -316,6 +316,54 @@ internal static class Arm64Simd
 
     internal static Arm64Instruction LoadStoreSingleStructure(uint instruction)
     {
+        var q = instruction.TestBit(30);
+        var isLoad = instruction.TestBit(22);
+        var r = instruction.TestBit(21);
+        var opcode = (instruction >> 13) & 0b111;
+        var s = instruction.TestBit(12);
+        var size = (instruction >> 10) & 0b11;
+        var rn = (int)(instruction >> 5) & 0b1_1111;
+        var rt = (int)instruction & 0b1_1111;
+
+        if (isLoad && !r && opcode == 0b110)
+        {
+            var arrangement = size switch
+            {
+                0b00 => q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB,
+                0b01 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
+                0b10 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                0b11 when q => Arm64ArrangementSpecifier.TwoD,
+                _ => throw new Arm64UndefinedInstructionException("LD1R: reserved arrangement"),
+            };
+            return new()
+            {
+                Mnemonic = Arm64Mnemonic.LD1R,
+                MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore,
+                Op0Kind = Arm64OperandKind.Register,
+                Op1Kind = Arm64OperandKind.Memory,
+                Op0Reg = Arm64Register.V0 + rt,
+                Op0Arrangement = arrangement,
+                MemBase = Arm64Register.X0 + rn,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+            };
+        }
+
+        if (isLoad && !r && opcode == 0b100 && size == 0)
+        {
+            var index = (q ? 2 : 0) | (s ? 1 : 0);
+            return new()
+            {
+                Mnemonic = Arm64Mnemonic.LD1,
+                MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore,
+                Op0Kind = Arm64OperandKind.VectorRegisterElement,
+                Op1Kind = Arm64OperandKind.Memory,
+                Op0Reg = Arm64Register.V0 + rt,
+                Op0VectorElement = new(Arm64VectorElementWidth.S, index),
+                MemBase = Arm64Register.X0 + rn,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+            };
+        }
+
         return new()
         {
             Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,

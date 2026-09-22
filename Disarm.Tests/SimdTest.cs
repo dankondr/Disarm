@@ -146,6 +146,41 @@ public class SimdTest : BaseDisarmTest
     }
 
     [Fact]
+    public void TestCastleCorpusAdvancedSimdCoverage()
+    {
+        var cases = new (uint Raw, Arm64Mnemonic Mnemonic)[]
+        {
+            (0x0EA00800, Arm64Mnemonic.REV64),
+            (0x0F3F5400, Arm64Mnemonic.SHL),
+            (0x4E219800, Arm64Mnemonic.FRINTM),
+            (0x0EA0A800, Arm64Mnemonic.CMLT),
+            (0x0EA0C800, Arm64Mnemonic.FCMGT),
+            (0x4D40C900, Arm64Mnemonic.LD1R),
+            (0x0E21D800, Arm64Mnemonic.SCVTF),
+            (0x2EA0F800, Arm64Mnemonic.FNEG),
+            (0x0EA0F801, Arm64Mnemonic.FABS),
+            (0x4EA0E802, Arm64Mnemonic.FCMLT),
+            (0x0E612821, Arm64Mnemonic.XTN),
+            (0x0F20A421, Arm64Mnemonic.SSHLL),
+            (0x2E70A821, Arm64Mnemonic.UMAXV),
+            (0x0D409122, Arm64Mnemonic.LD1),
+            (0x2E600842, Arm64Mnemonic.REV32),
+            (0x4EE1B842, Arm64Mnemonic.FCVTZS),
+        };
+
+        foreach (var (raw, mnemonic) in cases)
+            DisassembleAndCheckMnemonic(raw, mnemonic);
+
+        var shift = Disassembler.DisassembleSingleInstruction(0x0F3F5400);
+        Assert.Equal(31, shift.Op2Imm);
+        Assert.Equal(Arm64ArrangementSpecifier.TwoS, shift.Op0Arrangement);
+
+        var laneLoad = Disassembler.DisassembleSingleInstruction(0x4D409141);
+        Assert.Equal(new Arm64VectorElement(Arm64VectorElementWidth.S, 3).ToString(), laneLoad.Op0VectorElement.ToString());
+        Assert.Equal(Arm64Register.X10, laneLoad.MemBase);
+    }
+
+    [Fact]
     public void TestCryptoAes()
     {
         var insn = DisassembleAndCheckMnemonic(0x4E284820, Arm64Mnemonic.AESE);
