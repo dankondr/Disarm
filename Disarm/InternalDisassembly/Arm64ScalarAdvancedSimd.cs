@@ -732,7 +732,7 @@ internal static class Arm64ScalarAdvancedSimd
             throw new Arm64UndefinedInstructionException("Unallocated");
         
         var size = (instruction >> 22) & 0b11; //Bits 22-23
-        var rm = (int) (instruction >> 5) & 0b1_1111; //Bits 16-20
+        var rm = (int) (instruction >> 16) & 0b1_1111; //Bits 16-20
         var opcode = (instruction >> 12) & 0b1111; //Bits 12-15
         var rn = (int) (instruction >> 5) & 0b1_1111; //Bits 5-9
         var rd = (int) instruction & 0b1_1111; //Bits 0-4
@@ -778,7 +778,7 @@ internal static class Arm64ScalarAdvancedSimd
     {
         var uFlag = instruction.TestBit(29); // Bit 29
         var size = (instruction >> 22) & 0b11; //Bits 22-23
-        var rm = (int) (instruction >> 5) & 0b1_1111; //Bits 16-20
+        var rm = (int) (instruction >> 16) & 0b1_1111; //Bits 16-20
         var opcode = (instruction >> 11) & 0b1_1111; //Bits 11-15
         var rn = (int) (instruction >> 5) & 0b1_1111; //Bits 5-9
         var rd = (int) instruction & 0b1_1111; //Bits 0-4
@@ -918,7 +918,7 @@ internal static class Arm64ScalarAdvancedSimd
     public static Arm64Instruction ThreeSameFp16(uint instruction)
     {
         var uFlag = instruction.TestBit(29); // Bit 29
-        var rm = (int) (instruction >> 5) & 0b1_1111; //Bits 16-20
+        var rm = (int) (instruction >> 16) & 0b1_1111; //Bits 16-20
         var opcode = (instruction >> 11) & 0b111; //Bits 11-13
         var rn = (int) (instruction >> 5) & 0b1_1111; //Bits 5-9
         var rd = (int) instruction & 0b1_1111; //Bits 0-4
@@ -965,15 +965,15 @@ internal static class Arm64ScalarAdvancedSimd
             throw new Arm64UndefinedInstructionException("Unallocated");
         
         var size = (instruction >> 22) & 0b11; //Bits 22-23
-        var rm = (int) (instruction >> 5) & 0b1_1111; //Bits 16-20
+        var rm = (int) (instruction >> 16) & 0b1_1111; //Bits 16-20
         var opcode = (instruction >> 11) & 0b1111; //Bits 11-14
         var rn = (int) (instruction >> 5) & 0b1_1111; //Bits 5-9
         var rd = (int) instruction & 0b1_1111; //Bits 0-4
 
         Arm64Register baseRegister = size switch
         {
-            0b10 => Arm64Register.H0,
-            0b11 => Arm64Register.S0,
+            0b01 => Arm64Register.H0,
+            0b10 => Arm64Register.S0,
             _ => throw new Arm64UndefinedInstructionException("Reserved")
         };
         

@@ -134,7 +134,8 @@ internal static class Arm64NonScalarAdvancedSimd
                         ? Arm64ArrangementSpecifier.FourS
                         : Arm64ArrangementSpecifier.TwoS; //Single precision
 
-            var convertedImmediate = Arm64CommonUtils.AdvancedSimdExpandImmediate(op, (byte)cmode, (byte) immediate);
+            var pType = op ? 0b01U : o2 ? 0b11U : 0b00U;
+            var convertedImmediate = Arm64CommonUtils.DecodeFPImm(pType, (uint)immediate);
             
             return new()
             {
@@ -142,8 +143,8 @@ internal static class Arm64NonScalarAdvancedSimd
                 Op0Kind = Arm64OperandKind.Register,
                 Op0Reg = Arm64Register.V0 + rd,
                 Op0Arrangement = arrangement,
-                Op1Kind = Arm64OperandKind.Immediate,
-                Op1Imm = (long)convertedImmediate,
+                Op1Kind = Arm64OperandKind.FloatingPointImmediate,
+                Op1FpImm = convertedImmediate,
                 MnemonicCategory = Arm64MnemonicCategory.SimdConstantToRegister,
             };
         }

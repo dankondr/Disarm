@@ -98,6 +98,54 @@ public class SimdTest : BaseDisarmTest
     }
 
     [Fact]
+    public void TestFmovImmediatePreservesDoubleAndVectorBits()
+    {
+        var scalar = DisassembleAndCheckMnemonic(0x1E629001, Arm64Mnemonic.FMOV);
+        Assert.Equal(Arm64OperandKind.FloatingPointImmediate, scalar.Op1Kind);
+        Assert.Equal(5.0, scalar.Op1FpImm);
+
+        var vector = DisassembleAndCheckMnemonic(0x0F03F600, Arm64Mnemonic.FMOV);
+        Assert.Equal(Arm64ArrangementSpecifier.TwoS, vector.Op0Arrangement);
+        Assert.Equal(Arm64OperandKind.FloatingPointImmediate, vector.Op1Kind);
+        Assert.Equal(1.0, vector.Op1FpImm);
+
+        var halfScalar = DisassembleAndCheckMnemonic(0x1EEE1000, Arm64Mnemonic.FMOV);
+        Assert.Equal(Arm64Register.H0, halfScalar.Op0Reg);
+        Assert.Equal(1.0, halfScalar.Op1FpImm);
+
+        var halfVector = DisassembleAndCheckMnemonic(0x0F03FE00, Arm64Mnemonic.FMOV);
+        Assert.Equal(Arm64ArrangementSpecifier.FourH, halfVector.Op0Arrangement);
+        Assert.Equal(1.0, halfVector.Op1FpImm);
+    }
+
+    [Theory]
+    [InlineData(false, 0b0000, 0x12, 0x0000001200000012UL)]
+    [InlineData(false, 0b0010, 0x12, 0x0000120000001200UL)]
+    [InlineData(false, 0b0100, 0x12, 0x0012000000120000UL)]
+    [InlineData(false, 0b0110, 0x12, 0x1200000012000000UL)]
+    [InlineData(false, 0b1000, 0x12, 0x0012001200120012UL)]
+    [InlineData(false, 0b1010, 0x12, 0x1200120012001200UL)]
+    [InlineData(false, 0b1100, 0x12, 0x000012FF000012FFUL)]
+    [InlineData(false, 0b1101, 0x12, 0x0012FFFF0012FFFFUL)]
+    [InlineData(false, 0b1110, 0x12, 0x1212121212121212UL)]
+    [InlineData(true, 0b1110, 0x01, 0x00000000000000FFUL)]
+    [InlineData(false, 0b1111, 0x70, 0x3F8000003F800000UL)]
+    [InlineData(true, 0b1111, 0x70, 0x3FF0000000000000UL)]
+    public void TestAdvancedSimdImmediateExpansion(bool op, byte cmode, byte immediate, ulong expected)
+        => Assert.Equal(expected, Arm64CommonUtils.AdvancedSimdExpandImmediate(op, cmode, immediate));
+
+    [Theory]
+    [InlineData(0x7EA1D400U, Arm64Mnemonic.FABD, Arm64Register.S1)]
+    [InlineData(0x7EC11400U, Arm64Mnemonic.FABD, Arm64Register.H1)]
+    [InlineData(0x5E629020U, Arm64Mnemonic.SQDMLAL, Arm64Register.H2)]
+    [InlineData(0x7E418400U, Arm64Mnemonic.SQRDMLAH, Arm64Register.H1)]
+    public void TestScalarAdvancedSimdReadsRmFromBits16To20(uint raw, Arm64Mnemonic mnemonic, Arm64Register expectedRm)
+    {
+        var result = DisassembleAndCheckMnemonic(raw, mnemonic);
+        Assert.Equal(expectedRm, result.Op2Reg);
+    }
+
+    [Fact]
     public void TestCryptoAes()
     {
         var insn = DisassembleAndCheckMnemonic(0x4E284820, Arm64Mnemonic.AESE);
@@ -489,7 +537,7 @@ public class SimdTest : BaseDisarmTest
     public void TestScalarAdvancedSimdScalarThreeSameExtra()
     {
         DisassembleAndCheckMnemonic(0x7E808400, Arm64Mnemonic.SQRDMLAH);
-        DisassembleAndCheckMnemonic(0x7EC08C00, Arm64Mnemonic.SQRDMLSH);
+        DisassembleAndCheckMnemonic(0x7E808C00, Arm64Mnemonic.SQRDMLSH);
     }
 
     [Fact]
