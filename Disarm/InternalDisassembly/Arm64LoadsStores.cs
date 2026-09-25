@@ -267,10 +267,84 @@ internal static class Arm64LoadsStores
     
     private static Arm64Instruction CompareAndSwap(uint instruction)
     {
+        var size = (instruction >> 30) & 0b11; //Bits 30-31: 00 = B, 01 = H, 10 = 32-bit, 11 = 64-bit
+        var isCasp = !instruction.TestBit(23); //bit 23 clear => CASP, which operates on a register pair
+        var acquire = instruction.TestBit(22); //a
+        var release = instruction.TestBit(15); //l
+        var rs = (int)(instruction >> 16) & 0b1_1111; //Bits 16-20: expected (old) value
+        var rt2 = (int)(instruction >> 10) & 0b1_1111; //Bits 10-14: must be 0b11111
+        var rn = (int)(instruction >> 5) & 0b1_1111;
+        var rt = (int)instruction & 0b1_1111; //Bits 0-4: new value
+
+        if (rt2 != 0b1_1111)
+            throw new Arm64UndefinedInstructionException("Compare and swap: bits 10-14 must be all ones");
+
+        if (isCasp && size > 1)
+            throw new Arm64UndefinedInstructionException("Compare and swap pair: size must be 0b00 or 0b01");
+
+        if (isCasp)
+        {
+            //CASP: compares and swaps the register pair <Rs,Rs+1> against the pair <Rt,Rt+1>
+            //size 0 => two 32-bit registers, size 1 => two 64-bit registers
+            var dataBase = size == 0b01 ? Arm64Register.X0 : Arm64Register.W0;
+            var mnemonic = (acquire, release) switch
+            {
+                (false, false) => Arm64Mnemonic.CASP,
+                (false, true) => Arm64Mnemonic.CASPL,
+                (true, false) => Arm64Mnemonic.CASPA,
+                (true, true) => Arm64Mnemonic.CASPAL,
+            };
+            return new()
+            {
+                Mnemonic = mnemonic,
+                MnemonicCategory = Arm64MnemonicCategory.Comparison,
+                Op0Kind = Arm64OperandKind.Register,
+                Op1Kind = Arm64OperandKind.Register,
+                Op2Kind = Arm64OperandKind.Register,
+                Op3Kind = Arm64OperandKind.Register,
+                Op4Kind = Arm64OperandKind.Memory,
+                Op0Reg = dataBase + rs,
+                Op1Reg = dataBase + (rs + 1) % 32,
+                Op2Reg = dataBase + rt,
+                Op3Reg = dataBase + (rt + 1) % 32,
+                MemBase = Arm64Register.X0 + rn,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+            };
+        }
+
+        //CAS: single register compare-and-swap
+        var dataBaseReg = size == 0b11 ? Arm64Register.X0 : Arm64Register.W0;
+        var casMnemonic = (size, acquire, release) switch
+        {
+            (0b00, false, false) => Arm64Mnemonic.CASB,
+            (0b00, false, true) => Arm64Mnemonic.CASLB,
+            (0b00, true, false) => Arm64Mnemonic.CASAB,
+            (0b00, true, true) => Arm64Mnemonic.CASALB,
+            (0b01, false, false) => Arm64Mnemonic.CASH,
+            (0b01, false, true) => Arm64Mnemonic.CASLH,
+            (0b01, true, false) => Arm64Mnemonic.CASAH,
+            (0b01, true, true) => Arm64Mnemonic.CASALH,
+            (0b10, false, false) => Arm64Mnemonic.CAS,
+            (0b10, false, true) => Arm64Mnemonic.CASL,
+            (0b10, true, false) => Arm64Mnemonic.CASA,
+            (0b10, true, true) => Arm64Mnemonic.CASAL,
+            (0b11, false, false) => Arm64Mnemonic.CAS,
+            (0b11, false, true) => Arm64Mnemonic.CASL,
+            (0b11, true, false) => Arm64Mnemonic.CASA,
+            (0b11, true, true) => Arm64Mnemonic.CASAL,
+            _ => throw new("Impossible size")
+        };
         return new()
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.Comparison, 
+            Mnemonic = casMnemonic,
+            MnemonicCategory = Arm64MnemonicCategory.Comparison,
+            Op0Kind = Arm64OperandKind.Register,
+            Op1Kind = Arm64OperandKind.Register,
+            Op2Kind = Arm64OperandKind.Memory,
+            Op0Reg = dataBaseReg + rs,
+            Op1Reg = dataBaseReg + rt,
+            MemBase = Arm64Register.X0 + rn,
+            MemIndexMode = Arm64MemoryIndexMode.Offset,
         };
     }
     
@@ -512,7 +586,8 @@ internal static class Arm64LoadsStores
                 0b01 when !isVector => Arm64Mnemonic.LDRSH, //64-bit variant
                 0b10 when !isVector => Arm64Mnemonic.LDRSW,
                 0b00 when isVector => Arm64Mnemonic.STR, //128-bit store
-                _ => throw new($"Impossible size: {size}")
+                //PRFM has no pre/post-indexed forms; size 0b11 with opc 0b10 is reserved here
+                _ => throw new Arm64UndefinedInstructionException($"Load/store register from immediate: invalid size/opc combination. size: {size}, opc: {opc}")
             },
             0b11 => size switch
             {
@@ -523,7 +598,7 @@ internal static class Arm64LoadsStores
             },
             _ => throw new("Impossible opc value")
         };
-        
+
         var baseReg = mnemonic switch
         {
             Arm64Mnemonic.STR or Arm64Mnemonic.LDR when isVector && opc is 0 or 1 => size switch
@@ -842,14 +917,14 @@ internal static class Arm64LoadsStores
                 0b00 => Arm64Mnemonic.LDRSB, //64-bit variant
                 0b01 => Arm64Mnemonic.LDRSH, //64-bit variant
                 0b10 => Arm64Mnemonic.LDRSW,
-                0b11 => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unsigned): opc 0b10 unallocated for size 0b11"), 
+                0b11 => Arm64Mnemonic.PRFM, //prefetch, unsigned scaled immediate
                 _ => throw new($"Impossible size: {size}")
             },
             0b11 => size switch
             {
                 0b00 => Arm64Mnemonic.LDRSB, //32-bit variant
                 0b01 => Arm64Mnemonic.LDRSH, //32-bit variant
-                0b10 => Arm64Mnemonic.PRFM, //TODO?
+                0b10 => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unsigned): opc 0b11 unallocated for size 0b10"),
                 0b11 => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unsigned): opc 0b11 unallocated for size 0b11"),
                 _ => throw new($"Impossible size: {size}")
             },
@@ -857,7 +932,20 @@ internal static class Arm64LoadsStores
         };
 
         if (mnemonic == Arm64Mnemonic.PRFM)
-            throw new NotImplementedException("If you're seeing this, reach out, because PRFM is not implemented.");
+        {
+            //PRFM has a prefetch operation operand instead of a data register
+            return new()
+            {
+                Mnemonic = Arm64Mnemonic.PRFM,
+                Op0Kind = Arm64OperandKind.Immediate,
+                Op0Imm = rt,
+                Op1Kind = Arm64OperandKind.Memory,
+                MemBase = Arm64Register.X0 + rn,
+                MemOffset = immediate,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+                MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+            };
+        }
 
         baseReg = mnemonic switch
         {
@@ -885,10 +973,227 @@ internal static class Arm64LoadsStores
 
     private static Arm64Instruction AtomicMemoryOperation(uint instruction)
     {
+        var size = (instruction >> 30) & 0b11; //Bits 30-31: element width B/H/W/X
+        var acquire = instruction.TestBit(23); //a bit - not present on the ST* store-alias form
+        var release = instruction.TestBit(22); //r bit - LDADDL etc.
+        var rs = (int)(instruction >> 16) & 0b1_1111; //Bits 16-20: value register
+        var opc = (instruction >> 12) & 0b1111; //Bits 12-15: operation
+        var rn = (int)(instruction >> 5) & 0b1_1111;
+        var rt = (int)instruction & 0b1_1111; //Bits 0-4: destination, or 31 for the store alias
+
+        if (opc >= 0b1001)
+            //0b1001-0b1011 are the RCW* pair operations (FEAT_LSE128), everything above is unallocated
+            throw new Arm64UndefinedInstructionException($"Atomic memory operation: opc 0b{opc:B} is reserved");
+
+        var dataBase = size == 0b11 ? Arm64Register.X0 : Arm64Register.W0;
+
+        //With rt == 31 and a == 0 the read-back goes to the zero register, so the LD* form
+        //becomes a plain ST* store-alias; with a == 1 the LD mnemonic is kept and Rt prints as wzr/xzr.
+        //SWP always keeps its mnemonic and the zero-register operand.
+        var useStoreAlias = rt == 0b1_1111 && !acquire && opc < 0b1000;
+
+        var mnemonic = (opc, size, release, useStoreAlias) switch
+        {
+            (0b0000, 0b00, false, false) => Arm64Mnemonic.LDADDB,
+            (0b0000, 0b00, false, true) => Arm64Mnemonic.STADDB,
+            (0b0000, 0b00, true, false) => Arm64Mnemonic.LDADDLB,
+            (0b0000, 0b00, true, true) => Arm64Mnemonic.STADDLB,
+            (0b0000, 0b01, false, false) => Arm64Mnemonic.LDADDH,
+            (0b0000, 0b01, false, true) => Arm64Mnemonic.STADDH,
+            (0b0000, 0b01, true, false) => Arm64Mnemonic.LDADDLH,
+            (0b0000, 0b01, true, true) => Arm64Mnemonic.STADDLH,
+            (0b0000, >= 0b10, false, false) => Arm64Mnemonic.LDADD,
+            (0b0000, >= 0b10, false, true) => Arm64Mnemonic.STADD,
+            (0b0000, >= 0b10, true, false) => Arm64Mnemonic.LDADDL,
+            (0b0000, >= 0b10, true, true) => Arm64Mnemonic.STADDL,
+            (0b0001, 0b00, false, false) => Arm64Mnemonic.LDCLRB,
+            (0b0001, 0b00, false, true) => Arm64Mnemonic.STCLRB,
+            (0b0001, 0b00, true, false) => Arm64Mnemonic.LDCLRLB,
+            (0b0001, 0b00, true, true) => Arm64Mnemonic.STCLRLB,
+            (0b0001, 0b01, false, false) => Arm64Mnemonic.LDCLRH,
+            (0b0001, 0b01, false, true) => Arm64Mnemonic.STCLRH,
+            (0b0001, 0b01, true, false) => Arm64Mnemonic.LDCLRLH,
+            (0b0001, 0b01, true, true) => Arm64Mnemonic.STCLRLH,
+            (0b0001, >= 0b10, false, false) => Arm64Mnemonic.LDCLR,
+            (0b0001, >= 0b10, false, true) => Arm64Mnemonic.STCLR,
+            (0b0001, >= 0b10, true, false) => Arm64Mnemonic.LDCLRL,
+            (0b0001, >= 0b10, true, true) => Arm64Mnemonic.STCLRL,
+            (0b0010, 0b00, false, false) => Arm64Mnemonic.LDEORB,
+            (0b0010, 0b00, false, true) => Arm64Mnemonic.STEORB,
+            (0b0010, 0b00, true, false) => Arm64Mnemonic.LDEORLB,
+            (0b0010, 0b00, true, true) => Arm64Mnemonic.STEORLB,
+            (0b0010, 0b01, false, false) => Arm64Mnemonic.LDEORH,
+            (0b0010, 0b01, false, true) => Arm64Mnemonic.STEORH,
+            (0b0010, 0b01, true, false) => Arm64Mnemonic.LDEORLH,
+            (0b0010, 0b01, true, true) => Arm64Mnemonic.STEORLH,
+            (0b0010, >= 0b10, false, false) => Arm64Mnemonic.LDEOR,
+            (0b0010, >= 0b10, false, true) => Arm64Mnemonic.STEOR,
+            (0b0010, >= 0b10, true, false) => Arm64Mnemonic.LDEORL,
+            (0b0010, >= 0b10, true, true) => Arm64Mnemonic.STEORL,
+            (0b0011, 0b00, false, false) => Arm64Mnemonic.LDSETB,
+            (0b0011, 0b00, false, true) => Arm64Mnemonic.STSETB,
+            (0b0011, 0b00, true, false) => Arm64Mnemonic.LDSETLB,
+            (0b0011, 0b00, true, true) => Arm64Mnemonic.STSETLB,
+            (0b0011, 0b01, false, false) => Arm64Mnemonic.LDSETH,
+            (0b0011, 0b01, false, true) => Arm64Mnemonic.STSETH,
+            (0b0011, 0b01, true, false) => Arm64Mnemonic.LDSETLH,
+            (0b0011, 0b01, true, true) => Arm64Mnemonic.STSETLH,
+            (0b0011, >= 0b10, false, false) => Arm64Mnemonic.LDSET,
+            (0b0011, >= 0b10, false, true) => Arm64Mnemonic.STSET,
+            (0b0011, >= 0b10, true, false) => Arm64Mnemonic.LDSETL,
+            (0b0011, >= 0b10, true, true) => Arm64Mnemonic.STSETL,
+            (0b0100, 0b00, false, false) => Arm64Mnemonic.LDSMAXB,
+            (0b0100, 0b00, false, true) => Arm64Mnemonic.STSMAXB,
+            (0b0100, 0b00, true, false) => Arm64Mnemonic.LDSMAXLB,
+            (0b0100, 0b00, true, true) => Arm64Mnemonic.STSMAXLB,
+            (0b0100, 0b01, false, false) => Arm64Mnemonic.LDSMAXH,
+            (0b0100, 0b01, false, true) => Arm64Mnemonic.STSMAXH,
+            (0b0100, 0b01, true, false) => Arm64Mnemonic.LDSMAXLH,
+            (0b0100, 0b01, true, true) => Arm64Mnemonic.STSMAXLH,
+            (0b0100, >= 0b10, false, false) => Arm64Mnemonic.LDSMAX,
+            (0b0100, >= 0b10, false, true) => Arm64Mnemonic.STSMAX,
+            (0b0100, >= 0b10, true, false) => Arm64Mnemonic.LDSMAXL,
+            (0b0100, >= 0b10, true, true) => Arm64Mnemonic.STSMAXL,
+            (0b0101, 0b00, false, false) => Arm64Mnemonic.LDSMINB,
+            (0b0101, 0b00, false, true) => Arm64Mnemonic.STSMINB,
+            (0b0101, 0b00, true, false) => Arm64Mnemonic.LDSMINLB,
+            (0b0101, 0b00, true, true) => Arm64Mnemonic.STSMINLB,
+            (0b0101, 0b01, false, false) => Arm64Mnemonic.LDSMINH,
+            (0b0101, 0b01, false, true) => Arm64Mnemonic.STSMINH,
+            (0b0101, 0b01, true, false) => Arm64Mnemonic.LDSMINLH,
+            (0b0101, 0b01, true, true) => Arm64Mnemonic.STSMINLH,
+            (0b0101, >= 0b10, false, false) => Arm64Mnemonic.LDSMIN,
+            (0b0101, >= 0b10, false, true) => Arm64Mnemonic.STSMIN,
+            (0b0101, >= 0b10, true, false) => Arm64Mnemonic.LDSMINL,
+            (0b0101, >= 0b10, true, true) => Arm64Mnemonic.STSMINL,
+            (0b0110, 0b00, false, false) => Arm64Mnemonic.LDUMAXB,
+            (0b0110, 0b00, false, true) => Arm64Mnemonic.STUMAXB,
+            (0b0110, 0b00, true, false) => Arm64Mnemonic.LDUMAXLB,
+            (0b0110, 0b00, true, true) => Arm64Mnemonic.STUMAXLB,
+            (0b0110, 0b01, false, false) => Arm64Mnemonic.LDUMAXH,
+            (0b0110, 0b01, false, true) => Arm64Mnemonic.STUMAXH,
+            (0b0110, 0b01, true, false) => Arm64Mnemonic.LDUMAXLH,
+            (0b0110, 0b01, true, true) => Arm64Mnemonic.STUMAXLH,
+            (0b0110, >= 0b10, false, false) => Arm64Mnemonic.LDUMAX,
+            (0b0110, >= 0b10, false, true) => Arm64Mnemonic.STUMAX,
+            (0b0110, >= 0b10, true, false) => Arm64Mnemonic.LDUMAXL,
+            (0b0110, >= 0b10, true, true) => Arm64Mnemonic.STUMAXL,
+            (0b0111, 0b00, false, false) => Arm64Mnemonic.LDUMINB,
+            (0b0111, 0b00, false, true) => Arm64Mnemonic.STUMINB,
+            (0b0111, 0b00, true, false) => Arm64Mnemonic.LDUMINLB,
+            (0b0111, 0b00, true, true) => Arm64Mnemonic.STUMINLB,
+            (0b0111, 0b01, false, false) => Arm64Mnemonic.LDUMINH,
+            (0b0111, 0b01, false, true) => Arm64Mnemonic.STUMINH,
+            (0b0111, 0b01, true, false) => Arm64Mnemonic.LDUMINLH,
+            (0b0111, 0b01, true, true) => Arm64Mnemonic.STUMINLH,
+            (0b0111, >= 0b10, false, false) => Arm64Mnemonic.LDUMIN,
+            (0b0111, >= 0b10, false, true) => Arm64Mnemonic.STUMIN,
+            (0b0111, >= 0b10, true, false) => Arm64Mnemonic.LDUMINL,
+            (0b0111, >= 0b10, true, true) => Arm64Mnemonic.STUMINL,
+            (0b1000, 0b00, false, false) => Arm64Mnemonic.SWPB,
+            (0b1000, 0b00, false, true) => Arm64Mnemonic.SWPB, //SWP keeps its mnemonic on the wzr read-back
+            (0b1000, 0b00, true, false) => Arm64Mnemonic.SWPLB,
+            (0b1000, 0b00, true, true) => Arm64Mnemonic.SWPLB,
+            (0b1000, 0b01, false, false) => Arm64Mnemonic.SWPH,
+            (0b1000, 0b01, false, true) => Arm64Mnemonic.SWPH,
+            (0b1000, 0b01, true, false) => Arm64Mnemonic.SWPLH,
+            (0b1000, 0b01, true, true) => Arm64Mnemonic.SWPLH,
+            (0b1000, >= 0b10, false, false) => Arm64Mnemonic.SWP,
+            (0b1000, >= 0b10, false, true) => Arm64Mnemonic.SWP,
+            (0b1000, >= 0b10, true, false) => Arm64Mnemonic.SWPL,
+            (0b1000, >= 0b10, true, true) => Arm64Mnemonic.SWPL,
+            _ => throw new Arm64UndefinedInstructionException("Atomic memory operation: unallocated operation")
+        };
+
+        //the acquire bit prepends an A to the mnemonic where present (e.g. LDADDAB, SWPAL)
+        if (acquire)
+        {
+            mnemonic = mnemonic switch
+            {
+                Arm64Mnemonic.LDADDB => Arm64Mnemonic.LDADDAB,
+                Arm64Mnemonic.LDADDLB => Arm64Mnemonic.LDADDALB,
+                Arm64Mnemonic.LDADDH => Arm64Mnemonic.LDADDAH,
+                Arm64Mnemonic.LDADDLH => Arm64Mnemonic.LDADDALH,
+                Arm64Mnemonic.LDADD => Arm64Mnemonic.LDADDA,
+                Arm64Mnemonic.LDADDL => Arm64Mnemonic.LDADDAL,
+                Arm64Mnemonic.LDCLRB => Arm64Mnemonic.LDCLRAB,
+                Arm64Mnemonic.LDCLRLB => Arm64Mnemonic.LDCLRALB,
+                Arm64Mnemonic.LDCLRH => Arm64Mnemonic.LDCLRAH,
+                Arm64Mnemonic.LDCLRLH => Arm64Mnemonic.LDCLRALH,
+                Arm64Mnemonic.LDCLR => Arm64Mnemonic.LDCLRA,
+                Arm64Mnemonic.LDCLRL => Arm64Mnemonic.LDCLRAL,
+                Arm64Mnemonic.LDEORB => Arm64Mnemonic.LDEORAB,
+                Arm64Mnemonic.LDEORLB => Arm64Mnemonic.LDEORALB,
+                Arm64Mnemonic.LDEORH => Arm64Mnemonic.LDEORAH,
+                Arm64Mnemonic.LDEORLH => Arm64Mnemonic.LDEORALH,
+                Arm64Mnemonic.LDEOR => Arm64Mnemonic.LDEORA,
+                Arm64Mnemonic.LDEORL => Arm64Mnemonic.LDEORAL,
+                Arm64Mnemonic.LDSETB => Arm64Mnemonic.LDSETAB,
+                Arm64Mnemonic.LDSETLB => Arm64Mnemonic.LDSETALB,
+                Arm64Mnemonic.LDSETH => Arm64Mnemonic.LDSETAH,
+                Arm64Mnemonic.LDSETLH => Arm64Mnemonic.LDSETALH,
+                Arm64Mnemonic.LDSET => Arm64Mnemonic.LDSETA,
+                Arm64Mnemonic.LDSETL => Arm64Mnemonic.LDSETAL,
+                Arm64Mnemonic.LDSMAXB => Arm64Mnemonic.LDSMAXAB,
+                Arm64Mnemonic.LDSMAXLB => Arm64Mnemonic.LDSMAXALB,
+                Arm64Mnemonic.LDSMAXH => Arm64Mnemonic.LDSMAXAH,
+                Arm64Mnemonic.LDSMAXLH => Arm64Mnemonic.LDSMAXALH,
+                Arm64Mnemonic.LDSMAX => Arm64Mnemonic.LDSMAXA,
+                Arm64Mnemonic.LDSMAXL => Arm64Mnemonic.LDSMAXAL,
+                Arm64Mnemonic.LDSMINB => Arm64Mnemonic.LDSMINAB,
+                Arm64Mnemonic.LDSMINLB => Arm64Mnemonic.LDSMINALB,
+                Arm64Mnemonic.LDSMINH => Arm64Mnemonic.LDSMINAH,
+                Arm64Mnemonic.LDSMINLH => Arm64Mnemonic.LDSMINALH,
+                Arm64Mnemonic.LDSMIN => Arm64Mnemonic.LDSMINA,
+                Arm64Mnemonic.LDSMINL => Arm64Mnemonic.LDSMINAL,
+                Arm64Mnemonic.LDUMAXB => Arm64Mnemonic.LDUMAXAB,
+                Arm64Mnemonic.LDUMAXLB => Arm64Mnemonic.LDUMAXALB,
+                Arm64Mnemonic.LDUMAXH => Arm64Mnemonic.LDUMAXAH,
+                Arm64Mnemonic.LDUMAXLH => Arm64Mnemonic.LDUMAXALH,
+                Arm64Mnemonic.LDUMAX => Arm64Mnemonic.LDUMAXA,
+                Arm64Mnemonic.LDUMAXL => Arm64Mnemonic.LDUMAXAL,
+                Arm64Mnemonic.LDUMINB => Arm64Mnemonic.LDUMINAB,
+                Arm64Mnemonic.LDUMINLB => Arm64Mnemonic.LDUMINALB,
+                Arm64Mnemonic.LDUMINH => Arm64Mnemonic.LDUMINAH,
+                Arm64Mnemonic.LDUMINLH => Arm64Mnemonic.LDUMINALH,
+                Arm64Mnemonic.LDUMIN => Arm64Mnemonic.LDUMINA,
+                Arm64Mnemonic.LDUMINL => Arm64Mnemonic.LDUMINAL,
+                Arm64Mnemonic.SWPB => Arm64Mnemonic.SWPAB,
+                Arm64Mnemonic.SWPLB => Arm64Mnemonic.SWPALB,
+                Arm64Mnemonic.SWPH => Arm64Mnemonic.SWPAH,
+                Arm64Mnemonic.SWPLH => Arm64Mnemonic.SWPALH,
+                Arm64Mnemonic.SWP => Arm64Mnemonic.SWPA,
+                Arm64Mnemonic.SWPL => Arm64Mnemonic.SWPAL,
+                _ => mnemonic
+            };
+        }
+
+        if (useStoreAlias)
+        {
+            //ST<op><l><size>: single register operand, no read-back
+            return new()
+            {
+                Mnemonic = mnemonic,
+                MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+                Op0Kind = Arm64OperandKind.Register,
+                Op1Kind = Arm64OperandKind.Memory,
+                Op0Reg = dataBase + rs,
+                MemBase = Arm64Register.X0 + rn,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+            };
+        }
+
         return new()
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
+            Mnemonic = mnemonic,
             MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+            Op0Kind = Arm64OperandKind.Register,
+            Op1Kind = Arm64OperandKind.Register,
+            Op2Kind = Arm64OperandKind.Memory,
+            Op0Reg = dataBase + rs,
+            Op1Reg = dataBase + rt,
+            MemBase = Arm64Register.X0 + rn,
+            MemIndexMode = Arm64MemoryIndexMode.Offset,
         };
     }
 
@@ -947,9 +1252,28 @@ internal static class Arm64LoadsStores
         };
 
         var isShiftedRegister = option == 0b011;
-        
+
         if (mnemonic == Arm64Mnemonic.PRFM)
-            throw new NotImplementedException("If you're seeing this, reach out, because PRFM is not implemented.");
+        {
+            //Prefetch with a register offset: Op0 is the prefetch operation immediate;
+            //PRFM always behaves as the 64-bit size so S shifts by 3
+            var prfShiftAmount = sFlag ? 3 : 0;
+            var prfAddendBase = option.TestBit(0) ? Arm64Register.X0 : Arm64Register.W0;
+            return new()
+            {
+                Mnemonic = Arm64Mnemonic.PRFM,
+                Op0Kind = Arm64OperandKind.Immediate,
+                Op0Imm = rt,
+                Op1Kind = Arm64OperandKind.Memory,
+                MemBase = Arm64Register.X0 + rn,
+                MemAddendReg = prfAddendBase + rm,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+                MemExtendType = isShiftedRegister ? Arm64ExtendType.NONE : (Arm64ExtendType)option,
+                MemShiftType = isShiftedRegister && sFlag ? Arm64ShiftType.LSL : Arm64ShiftType.NONE,
+                MemExtendOrShiftAmount = prfShiftAmount,
+                MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+            };
+        }
 
         var baseReg = mnemonic switch
         {
@@ -1054,6 +1378,7 @@ internal static class Arm64LoadsStores
                 0b00 when !isVector => Arm64Mnemonic.LDURSB, //64-bit variant
                 0b01 when !isVector => Arm64Mnemonic.LDURSH, //64-bit variant
                 0b10 when !isVector => Arm64Mnemonic.LDURSW,
+                0b11 when !isVector => Arm64Mnemonic.PRFUM, //prefetch, unscaled signed immediate
                 0b00 when isVector => Arm64Mnemonic.STUR, //128-bit store
                 _ when isVector => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unscaled): opc 0b10 unallocated for vectors when size > 0"),
                 _ => throw new($"Impossible size: {size}")
@@ -1062,7 +1387,7 @@ internal static class Arm64LoadsStores
             {
                 0b00 when !isVector => Arm64Mnemonic.LDURSB, //32-bit variant
                 0b01 when !isVector => Arm64Mnemonic.LDURSH, //32-bit variant
-                0b10 when !isVector => Arm64Mnemonic.PRFUM, //TODO?
+                0b10 when !isVector => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unscaled): opc 0b11 unallocated for size 0b10"),
                 0b00 when isVector => Arm64Mnemonic.LDUR, //128-bit store
                 0b11 => throw new Arm64UndefinedInstructionException("Load/store register from immediate (unscaled): opc 0b11 unallocated for size 0b11"),
                 _ => throw new($"Impossible size: {size}")
@@ -1071,8 +1396,21 @@ internal static class Arm64LoadsStores
         };
         
         if (mnemonic == Arm64Mnemonic.PRFUM)
-            throw new NotImplementedException("If you're seeing this, reach out, because PRFUM is not implemented.");
-        
+        {
+            var prfumOffset = Arm64CommonUtils.SignExtend(imm9, 9, 64);
+            return new()
+            {
+                Mnemonic = Arm64Mnemonic.PRFUM,
+                Op0Kind = Arm64OperandKind.Immediate,
+                Op0Imm = rt,
+                Op1Kind = Arm64OperandKind.Memory,
+                MemBase = Arm64Register.X0 + rn,
+                MemOffset = prfumOffset,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+                MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+            };
+        }
+
         var baseReg = mnemonic switch
         {
             Arm64Mnemonic.STUR or Arm64Mnemonic.LDUR when isVector && opc is 0 or 1 => size switch
@@ -1123,10 +1461,51 @@ internal static class Arm64LoadsStores
 
     private static Arm64Instruction LoadStoreExclusivePair(uint instruction)
     {
+        var size = (instruction >> 30) & 0b11; //Bits 30-31: 0b10 = 32-bit pairs, 0b11 = 64-bit pairs
+        var isLoad = instruction.TestBit(22);
+        var o0 = instruction.TestBit(15); //acquire
+        var rs = (int)(instruction >> 16) & 0b1_1111; //Bits 16-20: status register on stores
+        var rt2 = (int)(instruction >> 10) & 0b1_1111; //Bits 10-14: second data register
+        var rn = (int)(instruction >> 5) & 0b1_1111;
+        var rt = (int)instruction & 0b1_1111;
+
+        var dataBase = size == 0b10 ? Arm64Register.W0 : Arm64Register.X0;
+        var mnemonic = (isLoad, o0) switch
+        {
+            (false, false) => Arm64Mnemonic.STXP,
+            (false, true) => Arm64Mnemonic.STLXP,
+            (true, false) => Arm64Mnemonic.LDXP,
+            (true, true) => Arm64Mnemonic.LDAXP,
+        };
+
+        if (isLoad)
+            return new()
+            {
+                Mnemonic = mnemonic,
+                MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+                Op0Kind = Arm64OperandKind.Register,
+                Op1Kind = Arm64OperandKind.Register,
+                Op2Kind = Arm64OperandKind.Memory,
+                Op0Reg = dataBase + rt,
+                Op1Reg = dataBase + rt2,
+                MemBase = Arm64Register.X0 + rn,
+                MemIndexMode = Arm64MemoryIndexMode.Offset,
+            };
+
+        //stores prepend a status result register: STXP Ws, Wt1, Wt2, [Xn]
         return new()
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister, 
+            Mnemonic = mnemonic,
+            MnemonicCategory = Arm64MnemonicCategory.MemoryToOrFromRegister,
+            Op0Kind = Arm64OperandKind.Register,
+            Op1Kind = Arm64OperandKind.Register,
+            Op2Kind = Arm64OperandKind.Register,
+            Op3Kind = Arm64OperandKind.Memory,
+            Op0Reg = Arm64Register.W0 + rs,
+            Op1Reg = dataBase + rt,
+            Op2Reg = dataBase + rt2,
+            MemBase = Arm64Register.X0 + rn,
+            MemIndexMode = Arm64MemoryIndexMode.Offset,
         };
     }
 }

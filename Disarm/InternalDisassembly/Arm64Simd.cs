@@ -230,6 +230,9 @@ internal static class Arm64Simd
         var rn = (int)(instruction >> 5) & 0b1_1111; //Bits 5-9
         var rt = (int)(instruction & 0b1_1111); //Bits 0-4
 
+        if (instruction.TestBit(25))
+            throw new Arm64UndefinedInstructionException("Load/store multiple structures: bit 25 must be zero");
+
         var (mnemonic, numRegs) = opcode switch
         {
             0b0000 => (isLoad ? Arm64Mnemonic.LD4 : Arm64Mnemonic.ST4, 4),
@@ -314,70 +317,234 @@ internal static class Arm64Simd
         return insn;
     }
 
-    internal static Arm64Instruction LoadStoreSingleStructure(uint instruction)
+    internal static Arm64Instruction LoadStoreSingleStructure(uint instruction) => LoadStoreSingleStructureImpl(instruction, false);
+
+    internal static Arm64Instruction LoadStoreSingleStructurePostIndexed(uint instruction) => LoadStoreSingleStructureImpl(instruction, true);
+
+    private static Arm64Instruction LoadStoreSingleStructureImpl(uint instruction, bool postIndexed)
     {
         var q = instruction.TestBit(30);
         var isLoad = instruction.TestBit(22);
         var r = instruction.TestBit(21);
+        var rm = (int)(instruction >> 16) & 0b1_1111; //post-indexed only
         var opcode = (instruction >> 13) & 0b111;
         var s = instruction.TestBit(12);
         var size = (instruction >> 10) & 0b11;
         var rn = (int)(instruction >> 5) & 0b1_1111;
         var rt = (int)instruction & 0b1_1111;
 
-        if (isLoad && !r && opcode == 0b110)
+        if (instruction.TestBit(25))
+            throw new Arm64UndefinedInstructionException("Load/store single structure: bit 25 must be zero");
+
+        if (!postIndexed && (instruction >> 16 & 0b1_1111) != 0)
+            throw new Arm64UndefinedInstructionException("Load/store single structure: bits 16-20 must be zero");
+
+        //Replicate loads (LD1R-LD4R) fill an entire vector from a single element
+        if (opcode >= 0b110)
         {
+            if (!isLoad)
+                throw new Arm64UndefinedInstructionException("Load/store single structure: stores do not have a replicate form");
+
+            if (s)
+                throw new Arm64UndefinedInstructionException("Load/store single structure: S must be zero for replicate loads");
+
+            var (repMnemonic, numReplicateRegs) = (r, opcode) switch
+            {
+                (false, 0b110) => (Arm64Mnemonic.LD1R, 1),
+                (true, 0b110) => (Arm64Mnemonic.LD2R, 2),
+                (false, 0b111) => (Arm64Mnemonic.LD3R, 3),
+                (true, 0b111) => (Arm64Mnemonic.LD4R, 4),
+                _ => throw new("Impossible replicate opcode")
+            };
+
             var arrangement = size switch
             {
                 0b00 => q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB,
                 0b01 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
                 0b10 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
                 0b11 when q => Arm64ArrangementSpecifier.TwoD,
-                _ => throw new Arm64UndefinedInstructionException("LD1R: reserved arrangement"),
+                _ => Arm64ArrangementSpecifier.OneD,
             };
-            return new()
+
+            var insn = new Arm64Instruction
             {
-                Mnemonic = Arm64Mnemonic.LD1R,
+                Mnemonic = repMnemonic,
                 MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore,
                 Op0Kind = Arm64OperandKind.Register,
-                Op1Kind = Arm64OperandKind.Memory,
                 Op0Reg = Arm64Register.V0 + rt,
                 Op0Arrangement = arrangement,
                 MemBase = Arm64Register.X0 + rn,
-                MemIndexMode = Arm64MemoryIndexMode.Offset,
+                MemIndexMode = postIndexed ? Arm64MemoryIndexMode.PostIndex : Arm64MemoryIndexMode.Offset,
             };
-        }
 
-        if (isLoad && !r && opcode == 0b100 && size == 0)
-        {
-            var index = (q ? 2 : 0) | (s ? 1 : 0);
-            return new()
+            //each additional register takes the next operand slot
+            for (var i = 1; i < numReplicateRegs; i++)
             {
-                Mnemonic = Arm64Mnemonic.LD1,
-                MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore,
-                Op0Kind = Arm64OperandKind.VectorRegisterElement,
-                Op1Kind = Arm64OperandKind.Memory,
-                Op0Reg = Arm64Register.V0 + rt,
-                Op0VectorElement = new(Arm64VectorElementWidth.S, index),
-                MemBase = Arm64Register.X0 + rn,
-                MemIndexMode = Arm64MemoryIndexMode.Offset,
-            };
+                var kind = Arm64OperandKind.Register;
+                var reg = Arm64Register.V0 + (rt + i) % 32;
+                switch (i)
+                {
+                    case 1:
+                        insn.Op1Kind = kind;
+                        insn.Op1Reg = reg;
+                        insn.Op1Arrangement = arrangement;
+                        break;
+                    case 2:
+                        insn.Op2Kind = kind;
+                        insn.Op2Reg = reg;
+                        insn.Op2Arrangement = arrangement;
+                        break;
+                    default:
+                        insn.Op3Kind = kind;
+                        insn.Op3Reg = reg;
+                        insn.Op3Arrangement = arrangement;
+                        break;
+                }
+            }
+
+            switch (numReplicateRegs)
+            {
+                case 1:
+                    insn.Op1Kind = Arm64OperandKind.Memory;
+                    break;
+                case 2:
+                    insn.Op2Kind = Arm64OperandKind.Memory;
+                    break;
+                case 3:
+                    insn.Op3Kind = Arm64OperandKind.Memory;
+                    break;
+                default:
+                    insn.Op4Kind = Arm64OperandKind.Memory;
+                    break;
+            }
+
+            if (postIndexed)
+            {
+                if (rm == 0b1_1111)
+                    insn.MemOffset = (1 << (int)size) * numReplicateRegs; //element size in bytes, times register count
+                else
+                    insn.MemAddendReg = Arm64Register.X0 + rm;
+            }
+
+            return insn;
         }
 
-        return new()
-        {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore, 
-        };
-    }
+        //LD1-LD4/ST1-ST4 single-element forms: opc<0> selects 1/3 or 2/4 registers
+        var numRegs = r
+            ? (opcode & 1) == 0 ? 2 : 4
+            : (opcode & 1) == 0 ? 1 : 3;
 
-    internal static Arm64Instruction LoadStoreSingleStructurePostIndexed(uint instruction)
-    {
-        return new()
+        var mnemonic = (isLoad, numRegs) switch
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore, 
+            (true, 1) => Arm64Mnemonic.LD1,
+            (true, 2) => Arm64Mnemonic.LD2,
+            (true, 3) => Arm64Mnemonic.LD3,
+            (true, 4) => Arm64Mnemonic.LD4,
+            (false, 1) => Arm64Mnemonic.ST1,
+            (false, 2) => Arm64Mnemonic.ST2,
+            (false, 3) => Arm64Mnemonic.ST3,
+            (false, 4) => Arm64Mnemonic.ST4,
+            _ => throw new("Impossible register count")
         };
+
+        //opc<2:1> selects the element width; the index comes from Q:S:size
+        Arm64VectorElementWidth elementWidth;
+        int index;
+        int elementBytes;
+        switch (opcode >> 1)
+        {
+            case 0b00:
+                elementWidth = Arm64VectorElementWidth.B;
+                index = (q ? 8 : 0) | (s ? 4 : 0) | (int)size;
+                elementBytes = 1;
+                break;
+            case 0b01:
+                if ((size & 1) != 0)
+                    throw new Arm64UndefinedInstructionException("Load/store single structure: size<0> must be zero for h elements");
+                elementWidth = Arm64VectorElementWidth.H;
+                index = (q ? 4 : 0) | (s ? 2 : 0) | (int)(size >> 1);
+                elementBytes = 2;
+                break;
+            default:
+                if (size == 0b00)
+                {
+                    elementWidth = Arm64VectorElementWidth.S;
+                    index = (q ? 2 : 0) | (s ? 1 : 0);
+                    elementBytes = 4;
+                }
+                else if (size == 0b01)
+                {
+                    if (s)
+                        throw new Arm64UndefinedInstructionException("Load/store single structure: S must be zero for d elements");
+                    elementWidth = Arm64VectorElementWidth.D;
+                    index = q ? 1 : 0;
+                    elementBytes = 8;
+                }
+                else
+                    throw new Arm64UndefinedInstructionException("Load/store single structure: d elements require size == 0b01");
+                break;
+        }
+
+        var result = new Arm64Instruction
+        {
+            Mnemonic = mnemonic,
+            MnemonicCategory = Arm64MnemonicCategory.SimdStructureLoadOrStore,
+            Op0Kind = Arm64OperandKind.VectorRegisterElement,
+            Op0Reg = Arm64Register.V0 + rt,
+            Op0VectorElement = new(elementWidth, index),
+            MemBase = Arm64Register.X0 + rn,
+            MemIndexMode = postIndexed ? Arm64MemoryIndexMode.PostIndex : Arm64MemoryIndexMode.Offset,
+        };
+
+        for (var i = 1; i < numRegs; i++)
+        {
+            var reg = Arm64Register.V0 + (rt + i) % 32;
+            var element = new Arm64VectorElement(elementWidth, index);
+            switch (i)
+            {
+                case 1:
+                    result.Op1Kind = Arm64OperandKind.VectorRegisterElement;
+                    result.Op1Reg = reg;
+                    result.Op1VectorElement = element;
+                    break;
+                case 2:
+                    result.Op2Kind = Arm64OperandKind.VectorRegisterElement;
+                    result.Op2Reg = reg;
+                    result.Op2VectorElement = element;
+                    break;
+                default:
+                    result.Op3Kind = Arm64OperandKind.VectorRegisterElement;
+                    result.Op3Reg = reg;
+                    result.Op3VectorElement = element;
+                    break;
+            }
+        }
+
+        switch (numRegs)
+        {
+            case 1:
+                result.Op1Kind = Arm64OperandKind.Memory;
+                break;
+            case 2:
+                result.Op2Kind = Arm64OperandKind.Memory;
+                break;
+            case 3:
+                result.Op3Kind = Arm64OperandKind.Memory;
+                break;
+            default:
+                result.Op4Kind = Arm64OperandKind.Memory;
+                break;
+        }
+
+        if (postIndexed)
+        {
+            if (rm == 0b1_1111)
+                result.MemOffset = elementBytes * numRegs;
+            else
+                result.MemAddendReg = Arm64Register.X0 + rm;
+        }
+
+        return result;
     }
     
     public static Arm64Instruction AdvancedSimdScalarCopy(uint instruction)

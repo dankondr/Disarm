@@ -151,6 +151,7 @@ internal static class Arm64NonScalarAdvancedSimd
 
         Arm64Mnemonic mnemonic;
         int shiftAmount;
+        var shiftType = Arm64ShiftType.LSL;
         var baseReg = Arm64Register.V0;
 
         if (!op)
@@ -163,8 +164,8 @@ internal static class Arm64NonScalarAdvancedSimd
                 //16-bit shifted imm
                 (mnemonic, arrangement, shiftAmount) = (Arm64Mnemonic.MOVI, qFlag ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH, cmode.TestBit(1) ? 8 : 0);
             else if (cmode.TestPattern(0b1110, 0b1100))
-                //32-bit shifting ones
-                (mnemonic, arrangement, shiftAmount) = (Arm64Mnemonic.MOVI, qFlag ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS, cmode.TestBit(0) ? 16 : 8);
+                //32-bit shifting ones (msl)
+                (mnemonic, arrangement, shiftAmount, shiftType) = (Arm64Mnemonic.MOVI, qFlag ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS, cmode.TestBit(0) ? 16 : 8, Arm64ShiftType.MSL);
             else if (cmode == 0b1110)
                 //8-bit
                 (mnemonic, arrangement, shiftAmount) = (Arm64Mnemonic.MOVI, qFlag ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB, 0);
@@ -188,8 +189,8 @@ internal static class Arm64NonScalarAdvancedSimd
                 //16-bit shifted imm
                 (mnemonic, arrangement, shiftAmount) = (Arm64Mnemonic.MVNI, qFlag ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH, cmode.TestBit(1) ? 8 : 0);
             else if (cmode.TestPattern(0b1110, 0b1100))
-                //32-bit shifting ones
-                (mnemonic, arrangement, shiftAmount) = (Arm64Mnemonic.MVNI, qFlag ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS, cmode.TestBit(0) ? 16 : 8);
+                //32-bit shifting ones (msl)
+                (mnemonic, arrangement, shiftAmount, shiftType) = (Arm64Mnemonic.MVNI, qFlag ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS, cmode.TestBit(0) ? 16 : 8, Arm64ShiftType.MSL);
             //bic
             else if (cmode.TestPattern(0b1001, 0b0001))
                 //32-bit
@@ -224,7 +225,7 @@ internal static class Arm64NonScalarAdvancedSimd
             Op1Imm = immediate,
             Op2Kind = shiftAmount > 0 ? Arm64OperandKind.Immediate : Arm64OperandKind.None,
             Op2Imm = shiftAmount,
-            Op2ShiftType = shiftAmount > 0 ? Arm64ShiftType.LSL : Arm64ShiftType.NONE,
+            Op2ShiftType = shiftAmount > 0 ? shiftType : Arm64ShiftType.NONE,
             MnemonicCategory = Arm64MnemonicCategory.SimdConstantToRegister,
         };
     }
@@ -242,58 +243,211 @@ internal static class Arm64NonScalarAdvancedSimd
         if (immh == 0)
             throw new Arm64UndefinedInstructionException("Advanced SIMD shift by immediate: immh must not be zero");
 
-        var elementBits = immh.TestBit(3) ? 64 : immh.TestBit(2) ? 32 : immh.TestBit(1) ? 16 : 8;
-        var shift = (int)((immh << 3 | immb) - elementBits);
+        var imm = (int)(immh << 3 | immb);
+        var elementBits = 8 << Arm64CommonUtils.HighestSetBit(immh, 4);
 
-        if (!u && opcode == 0b01010)
+        var mnemonic = u switch
         {
-            var arrangement = IntegerArrangement(q, elementBits);
-            return new()
+            true => opcode switch
             {
-                Mnemonic = Arm64Mnemonic.SHL,
-                MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
-                Op0Kind = Arm64OperandKind.Register,
-                Op1Kind = Arm64OperandKind.Register,
-                Op2Kind = Arm64OperandKind.Immediate,
-                Op0Reg = Arm64Register.V0 + rd,
-                Op1Reg = Arm64Register.V0 + rn,
-                Op0Arrangement = arrangement,
-                Op1Arrangement = arrangement,
-                Op2Imm = shift,
-            };
-        }
-
-        if (!u && opcode == 0b10100 && elementBits < 64)
-        {
-            var sourceArrangement = IntegerArrangement(false, elementBits);
-            var destinationArrangement = elementBits switch
+                0b00000 => Arm64Mnemonic.USHR,
+                0b00010 => Arm64Mnemonic.USRA,
+                0b00100 => Arm64Mnemonic.URSHR,
+                0b00110 => Arm64Mnemonic.URSRA,
+                0b01000 => Arm64Mnemonic.SRI,
+                0b01010 => Arm64Mnemonic.SLI,
+                0b01100 => Arm64Mnemonic.SQSHLU,
+                0b01110 => Arm64Mnemonic.UQSHL,
+                0b10000 => q ? Arm64Mnemonic.SQSHRUN2 : Arm64Mnemonic.SQSHRUN,
+                0b10001 => q ? Arm64Mnemonic.SQRSHRUN2 : Arm64Mnemonic.SQRSHRUN,
+                0b10010 => q ? Arm64Mnemonic.UQSHRN2 : Arm64Mnemonic.UQSHRN,
+                0b10011 => q ? Arm64Mnemonic.UQRSHRN2 : Arm64Mnemonic.UQRSHRN,
+                0b10100 => q ? Arm64Mnemonic.USHLL2 : Arm64Mnemonic.USHLL,
+                0b11100 => Arm64Mnemonic.UCVTF,
+                0b11111 => Arm64Mnemonic.FCVTZU,
+                _ => throw new Arm64UndefinedInstructionException("Unallocated")
+            },
+            false => opcode switch
             {
-                8 => Arm64ArrangementSpecifier.EightH,
-                16 => Arm64ArrangementSpecifier.FourS,
-                32 => Arm64ArrangementSpecifier.TwoD,
-                _ => throw new Arm64UndefinedInstructionException("Advanced SIMD SSHLL: invalid element width"),
-            };
-
-            return new()
-            {
-                Mnemonic = q ? Arm64Mnemonic.SSHLL2 : Arm64Mnemonic.SSHLL,
-                MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
-                Op0Kind = Arm64OperandKind.Register,
-                Op1Kind = Arm64OperandKind.Register,
-                Op2Kind = Arm64OperandKind.Immediate,
-                Op0Reg = Arm64Register.V0 + rd,
-                Op1Reg = Arm64Register.V0 + rn,
-                Op0Arrangement = destinationArrangement,
-                Op1Arrangement = sourceArrangement,
-                Op2Imm = shift,
-            };
-        }
-
-        return new()
-        {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                0b00000 => Arm64Mnemonic.SSHR,
+                0b00010 => Arm64Mnemonic.SSRA,
+                0b00100 => Arm64Mnemonic.SRSHR,
+                0b00110 => Arm64Mnemonic.SRSRA,
+                0b01010 => Arm64Mnemonic.SHL,
+                0b01110 => Arm64Mnemonic.SQSHL,
+                0b10000 => q ? Arm64Mnemonic.SHRN2 : Arm64Mnemonic.SHRN,
+                0b10001 => q ? Arm64Mnemonic.RSHRN2 : Arm64Mnemonic.RSHRN,
+                0b10010 => q ? Arm64Mnemonic.SQSHRN2 : Arm64Mnemonic.SQSHRN,
+                0b10011 => q ? Arm64Mnemonic.SQRSHRN2 : Arm64Mnemonic.SQRSHRN,
+                0b10100 => q ? Arm64Mnemonic.SSHLL2 : Arm64Mnemonic.SSHLL,
+                0b11100 => Arm64Mnemonic.SCVTF,
+                0b11111 => Arm64Mnemonic.FCVTZS,
+                _ => throw new Arm64UndefinedInstructionException("Unallocated")
+            }
         };
+
+        switch (mnemonic)
+        {
+            //Right shifts keep the same element width: shift = 2 * esize - imm
+            case Arm64Mnemonic.SSHR:
+            case Arm64Mnemonic.SSRA:
+            case Arm64Mnemonic.SRSHR:
+            case Arm64Mnemonic.SRSRA:
+            case Arm64Mnemonic.USHR:
+            case Arm64Mnemonic.USRA:
+            case Arm64Mnemonic.URSHR:
+            case Arm64Mnemonic.URSRA:
+            case Arm64Mnemonic.SRI:
+            {
+                var arrangement = IntegerArrangement(q, elementBits);
+                return new()
+                {
+                    Mnemonic = mnemonic,
+                    MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                    Op0Kind = Arm64OperandKind.Register,
+                    Op1Kind = Arm64OperandKind.Register,
+                    Op2Kind = Arm64OperandKind.Immediate,
+                    Op0Reg = Arm64Register.V0 + rd,
+                    Op1Reg = Arm64Register.V0 + rn,
+                    Op0Arrangement = arrangement,
+                    Op1Arrangement = arrangement,
+                    Op2Imm = elementBits * 2 - imm,
+                };
+            }
+            //Left shifts keep the same element width: shift = imm - esize
+            case Arm64Mnemonic.SHL:
+            case Arm64Mnemonic.SLI:
+            case Arm64Mnemonic.SQSHL:
+            case Arm64Mnemonic.SQSHLU:
+            case Arm64Mnemonic.UQSHL:
+            {
+                var arrangement = IntegerArrangement(q, elementBits);
+                return new()
+                {
+                    Mnemonic = mnemonic,
+                    MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                    Op0Kind = Arm64OperandKind.Register,
+                    Op1Kind = Arm64OperandKind.Register,
+                    Op2Kind = Arm64OperandKind.Immediate,
+                    Op0Reg = Arm64Register.V0 + rd,
+                    Op1Reg = Arm64Register.V0 + rn,
+                    Op0Arrangement = arrangement,
+                    Op1Arrangement = arrangement,
+                    Op2Imm = imm - elementBits,
+                };
+            }
+            //Narrowing right shifts: destination is half-width, Q picks the "2" variant
+            case Arm64Mnemonic.SHRN:
+            case Arm64Mnemonic.SHRN2:
+            case Arm64Mnemonic.RSHRN:
+            case Arm64Mnemonic.RSHRN2:
+            case Arm64Mnemonic.SQSHRN:
+            case Arm64Mnemonic.SQSHRN2:
+            case Arm64Mnemonic.SQRSHRN:
+            case Arm64Mnemonic.SQRSHRN2:
+            case Arm64Mnemonic.SQSHRUN:
+            case Arm64Mnemonic.SQSHRUN2:
+            case Arm64Mnemonic.SQRSHRUN:
+            case Arm64Mnemonic.SQRSHRUN2:
+            case Arm64Mnemonic.UQSHRN:
+            case Arm64Mnemonic.UQSHRN2:
+            case Arm64Mnemonic.UQRSHRN:
+            case Arm64Mnemonic.UQRSHRN2:
+            {
+                if (elementBits == 64)
+                    throw new Arm64UndefinedInstructionException("Advanced SIMD shift by immediate: narrowing shift with 64-bit elements is reserved");
+
+                var destinationArrangement = elementBits switch
+                {
+                    8 => q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB,
+                    16 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
+                    32 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                    _ => throw new("Impossible element width")
+                };
+                var sourceArrangement = elementBits switch
+                {
+                    8 => Arm64ArrangementSpecifier.EightH,
+                    16 => Arm64ArrangementSpecifier.FourS,
+                    32 => Arm64ArrangementSpecifier.TwoD,
+                    _ => throw new("Impossible element width")
+                };
+                return new()
+                {
+                    Mnemonic = mnemonic,
+                    MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                    Op0Kind = Arm64OperandKind.Register,
+                    Op1Kind = Arm64OperandKind.Register,
+                    Op2Kind = Arm64OperandKind.Immediate,
+                    Op0Reg = Arm64Register.V0 + rd,
+                    Op1Reg = Arm64Register.V0 + rn,
+                    Op0Arrangement = destinationArrangement,
+                    Op1Arrangement = sourceArrangement,
+                    Op2Imm = elementBits * 2 - imm,
+                };
+            }
+            //Widening left shifts: source is half-width, destination is always full-width
+            case Arm64Mnemonic.SSHLL:
+            case Arm64Mnemonic.SSHLL2:
+            case Arm64Mnemonic.USHLL:
+            case Arm64Mnemonic.USHLL2:
+            {
+                if (elementBits == 64)
+                    throw new Arm64UndefinedInstructionException("Advanced SIMD shift by immediate: widening shift with 64-bit elements is reserved");
+
+                var destinationArrangement = elementBits switch
+                {
+                    8 => Arm64ArrangementSpecifier.EightH,
+                    16 => Arm64ArrangementSpecifier.FourS,
+                    32 => Arm64ArrangementSpecifier.TwoD,
+                    _ => throw new("Impossible element width")
+                };
+                return new()
+                {
+                    Mnemonic = mnemonic,
+                    MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                    Op0Kind = Arm64OperandKind.Register,
+                    Op1Kind = Arm64OperandKind.Register,
+                    Op2Kind = Arm64OperandKind.Immediate,
+                    Op0Reg = Arm64Register.V0 + rd,
+                    Op1Reg = Arm64Register.V0 + rn,
+                    Op0Arrangement = destinationArrangement,
+                    Op1Arrangement = IntegerArrangement(q, elementBits),
+                    Op2Imm = imm - elementBits,
+                };
+            }
+            //Fixed-point/float conversions: only 16/32/64-bit elements, fraction bits = 2 * esize - imm
+            case Arm64Mnemonic.SCVTF:
+            case Arm64Mnemonic.UCVTF:
+            case Arm64Mnemonic.FCVTZS:
+            case Arm64Mnemonic.FCVTZU:
+            {
+                if (elementBits == 8)
+                    throw new Arm64UndefinedInstructionException("Advanced SIMD shift by immediate: floating-point conversion with 8-bit elements is reserved");
+
+                var arrangement = elementBits switch
+                {
+                    16 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
+                    32 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                    64 when q => Arm64ArrangementSpecifier.TwoD,
+                    _ => throw new Arm64UndefinedInstructionException("Advanced SIMD shift by immediate: 1d floating-point conversion is reserved"),
+                };
+                return new()
+                {
+                    Mnemonic = mnemonic,
+                    MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+                    Op0Kind = Arm64OperandKind.Register,
+                    Op1Kind = Arm64OperandKind.Register,
+                    Op2Kind = Arm64OperandKind.Immediate,
+                    Op0Reg = Arm64Register.V0 + rd,
+                    Op1Reg = Arm64Register.V0 + rn,
+                    Op0Arrangement = arrangement,
+                    Op1Arrangement = arrangement,
+                    Op2Imm = elementBits * 2 - imm,
+                };
+            }
+            default:
+                throw new Arm64UndefinedInstructionException("Impossible mnemonic");
+        }
     }
 
     private static Arm64Instruction AdvancedSimdVectorXIndexedElement(uint instruction)
@@ -559,10 +713,34 @@ internal static class Arm64NonScalarAdvancedSimd
 
     private static Arm64Instruction AdvancedSimdTableLookup(uint instruction)
     {
+        var q = instruction.TestBit(30);
+        var rm = (int)(instruction >> 16) & 0b1_1111;
+        var len = (int)(instruction >> 13) & 0b11;
+        var isExtension = instruction.TestBit(12); //TBX reuses the destination lanes for out-of-range indices
+        var rn = (int)(instruction >> 5) & 0b1_1111;
+        var rd = (int)instruction & 0b1_1111;
+
+        if (instruction.TestBit(11))
+            throw new Arm64UndefinedInstructionException("Advanced SIMD table lookup: bit 11 is reserved");
+
+        var arrangement = q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB;
+
+        //The lookup table is a list of len+1 consecutive vector registers starting at Rn,
+        //always with the 16b arrangement; Op1Imm carries the register count.
         return new()
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.SimdRegisterToRegister, 
+            Mnemonic = isExtension ? Arm64Mnemonic.TBX : Arm64Mnemonic.TBL,
+            MnemonicCategory = Arm64MnemonicCategory.SimdRegisterToRegister,
+            Op0Kind = Arm64OperandKind.Register,
+            Op0Reg = Arm64Register.V0 + rd,
+            Op0Arrangement = arrangement,
+            Op1Kind = Arm64OperandKind.Register,
+            Op1Reg = Arm64Register.V0 + rn,
+            Op1Arrangement = Arm64ArrangementSpecifier.SixteenB,
+            Op1Imm = len + 1,
+            Op2Kind = Arm64OperandKind.Register,
+            Op2Reg = Arm64Register.V0 + rm,
+            Op2Arrangement = arrangement,
         };
     }
 
@@ -678,82 +856,289 @@ internal static class Arm64NonScalarAdvancedSimd
         var rn = (int)(instruction >> 5) & 0b1_1111;
         var rd = (int)instruction & 0b1_1111;
 
+        //For the floating-point instructions (opcodes 011xx and 11xxx), bit 23 of size
+        //is a variant selector ("a") and bit 22 is the element size ("sz": 0 => s, 1 => d)
+        var sz = size & 1;
+        var a = size >> 1;
+
         var mnemonic = (u, opcode) switch
         {
-            (false, 0b00000) => Arm64Mnemonic.REV64,
-            (true, 0b00000) => Arm64Mnemonic.REV32,
+            (false, 0b00000) when size != 0b11 => Arm64Mnemonic.REV64,
+            (false, 0b00001) when size == 0b00 => Arm64Mnemonic.REV16,
+            (false, 0b00010) when size != 0b11 => Arm64Mnemonic.SADDLP,
+            (false, 0b00011) => Arm64Mnemonic.SUQADD,
+            (false, 0b00100) when size != 0b11 => Arm64Mnemonic.CLS,
+            (false, 0b00101) when size == 0b00 => Arm64Mnemonic.CNT,
+            (false, 0b00110) when size != 0b11 => Arm64Mnemonic.SADALP,
+            (false, 0b00111) => Arm64Mnemonic.SQABS,
+            (false, 0b01000) => Arm64Mnemonic.CMGT,
+            (false, 0b01001) => Arm64Mnemonic.CMEQ,
             (false, 0b01010) => Arm64Mnemonic.CMLT,
-            (false, 0b01100) => Arm64Mnemonic.FCMGT,
-            (false, 0b01110) => Arm64Mnemonic.FCMLT,
-            (false, 0b01111) => Arm64Mnemonic.FABS,
-            (true, 0b01111) => Arm64Mnemonic.FNEG,
-            (false, 0b10010) => q ? Arm64Mnemonic.XTN2 : Arm64Mnemonic.XTN,
-            (false, 0b11001) => Arm64Mnemonic.FRINTM,
-            (false, 0b11011) => Arm64Mnemonic.FCVTZS,
-            (false, 0b11101) => Arm64Mnemonic.SCVTF,
-            _ => Arm64Mnemonic.UNIMPLEMENTED,
+            (false, 0b01011) => Arm64Mnemonic.ABS,
+            (false, 0b01100) when a == 1 => Arm64Mnemonic.FCMGT,
+            (false, 0b01101) when a == 1 => Arm64Mnemonic.FCMEQ,
+            (false, 0b01110) when a == 1 => Arm64Mnemonic.FCMLT,
+            (false, 0b01111) when a == 1 => Arm64Mnemonic.FABS,
+            (false, 0b10010) when size != 0b11 => q ? Arm64Mnemonic.XTN2 : Arm64Mnemonic.XTN,
+            (false, 0b10100) when size != 0b11 => q ? Arm64Mnemonic.SQXTN2 : Arm64Mnemonic.SQXTN,
+            (false, 0b10110) when size < 0b10 => q ? Arm64Mnemonic.FCVTN2 : Arm64Mnemonic.FCVTN,
+            (false, 0b10110) when size == 0b10 => q ? Arm64Mnemonic.BFCVTN2 : Arm64Mnemonic.BFCVTN,
+            (false, 0b10111) when size < 0b10 => q ? Arm64Mnemonic.FCVTL2 : Arm64Mnemonic.FCVTL,
+            (false, 0b11000) when a == 0 => Arm64Mnemonic.FRINTN,
+            (false, 0b11000) when a == 1 => Arm64Mnemonic.FRINTP,
+            (false, 0b11001) when a == 0 => Arm64Mnemonic.FRINTM,
+            (false, 0b11001) when a == 1 => Arm64Mnemonic.FRINTZ,
+            (false, 0b11010) when a == 0 => Arm64Mnemonic.FCVTNS,
+            (false, 0b11010) when a == 1 => Arm64Mnemonic.FCVTPS,
+            (false, 0b11011) when a == 0 => Arm64Mnemonic.FCVTMS,
+            (false, 0b11011) when a == 1 => Arm64Mnemonic.FCVTZS,
+            (false, 0b11100) when a == 0 => Arm64Mnemonic.FCVTAS,
+            (false, 0b11100) when a == 1 && sz == 0 => Arm64Mnemonic.URECPE,
+            (false, 0b11101) when a == 0 => Arm64Mnemonic.SCVTF,
+            (false, 0b11101) when a == 1 => Arm64Mnemonic.FRECPE,
+            (false, 0b11110) when a == 0 => Arm64Mnemonic.FRINT32Z,
+            (false, 0b11111) when a == 0 => Arm64Mnemonic.FRINT64Z,
+            (true, 0b00000) when size < 0b10 => Arm64Mnemonic.REV32,
+            (true, 0b00010) when size != 0b11 => Arm64Mnemonic.UADDLP,
+            (true, 0b00011) => Arm64Mnemonic.USQADD,
+            (true, 0b00100) when size != 0b11 => Arm64Mnemonic.CLZ,
+            (true, 0b00101) when size == 0b00 => Arm64Mnemonic.MVN,
+            (true, 0b00101) when size == 0b01 => Arm64Mnemonic.RBIT,
+            (true, 0b00110) when size != 0b11 => Arm64Mnemonic.UADALP,
+            (true, 0b00111) => Arm64Mnemonic.SQNEG,
+            (true, 0b01000) => Arm64Mnemonic.CMGE,
+            (true, 0b01001) => Arm64Mnemonic.CMLE,
+            (true, 0b01011) => Arm64Mnemonic.NEG,
+            (true, 0b01100) when a == 1 => Arm64Mnemonic.FCMGE,
+            (true, 0b01101) when a == 1 => Arm64Mnemonic.FCMLE,
+            (true, 0b01111) when a == 1 => Arm64Mnemonic.FNEG,
+            (true, 0b10010) when size != 0b11 => q ? Arm64Mnemonic.SQXTUN2 : Arm64Mnemonic.SQXTUN,
+            (true, 0b10011) when size != 0b11 => q ? Arm64Mnemonic.SHLL2 : Arm64Mnemonic.SHLL,
+            (true, 0b10100) when size != 0b11 => q ? Arm64Mnemonic.UQXTN2 : Arm64Mnemonic.UQXTN,
+            (true, 0b10110) when size == 0b01 => q ? Arm64Mnemonic.FCVTXN2 : Arm64Mnemonic.FCVTXN,
+            (true, 0b10111) => size switch
+            {
+                0b00 => q ? Arm64Mnemonic.F1CVTL2 : Arm64Mnemonic.F1CVTL,
+                0b01 => q ? Arm64Mnemonic.F2CVTL2 : Arm64Mnemonic.F2CVTL,
+                0b10 => q ? Arm64Mnemonic.BF1CVTL2 : Arm64Mnemonic.BF1CVTL,
+                _ => q ? Arm64Mnemonic.BF2CVTL2 : Arm64Mnemonic.BF2CVTL,
+            },
+            (true, 0b11000) when a == 0 => Arm64Mnemonic.FRINTA,
+            (true, 0b11001) when a == 0 => Arm64Mnemonic.FRINTX,
+            (true, 0b11001) when a == 1 => Arm64Mnemonic.FRINTI,
+            (true, 0b11010) when a == 0 => Arm64Mnemonic.FCVTNU,
+            (true, 0b11010) when a == 1 => Arm64Mnemonic.FCVTPU,
+            (true, 0b11011) when a == 0 => Arm64Mnemonic.FCVTMU,
+            (true, 0b11011) when a == 1 => Arm64Mnemonic.FCVTZU,
+            (true, 0b11100) when a == 0 => Arm64Mnemonic.FCVTAU,
+            (true, 0b11100) when a == 1 && sz == 0 => Arm64Mnemonic.URSQRTE,
+            (true, 0b11101) when a == 0 => Arm64Mnemonic.UCVTF,
+            (true, 0b11101) when a == 1 => Arm64Mnemonic.FRSQRTE,
+            (true, 0b11110) when a == 0 => Arm64Mnemonic.FRINT32X,
+            (true, 0b11111) when a == 0 => Arm64Mnemonic.FRINT64X,
+            (true, 0b11111) when a == 1 => Arm64Mnemonic.FSQRT,
+            _ => throw new Arm64UndefinedInstructionException($"Advanced SIMD two-register misc: unallocated U={u} opcode 0x{opcode:X} with size 0x{size:X}"),
         };
 
-        if (mnemonic == Arm64Mnemonic.UNIMPLEMENTED)
-            return new()
-            {
-                Mnemonic = mnemonic,
-                MnemonicCategory = Arm64MnemonicCategory.Unspecified,
-            };
-
-        if (mnemonic is Arm64Mnemonic.XTN or Arm64Mnemonic.XTN2)
-        {
-            var sourceArrangement = size switch
-            {
-                0b00 => Arm64ArrangementSpecifier.EightH,
-                0b01 => Arm64ArrangementSpecifier.FourS,
-                0b10 => Arm64ArrangementSpecifier.TwoD,
-                _ => throw new Arm64UndefinedInstructionException("Advanced SIMD XTN: size 0b11 is reserved"),
-            };
-            var destinationArrangement = size switch
-            {
-                0b00 => q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB,
-                0b01 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
-                0b10 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
-                _ => throw new Arm64UndefinedInstructionException("Advanced SIMD XTN: size 0b11 is reserved"),
-            };
-
-            return new()
-            {
-                Mnemonic = mnemonic,
-                MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
-                Op0Kind = Arm64OperandKind.Register,
-                Op1Kind = Arm64OperandKind.Register,
-                Op0Reg = Arm64Register.V0 + rd,
-                Op1Reg = Arm64Register.V0 + rn,
-                Op0Arrangement = destinationArrangement,
-                Op1Arrangement = sourceArrangement,
-            };
-        }
-
-        var arrangement = mnemonic switch
-        {
-            Arm64Mnemonic.FRINTM or Arm64Mnemonic.SCVTF => FloatingArrangement(q, size, false),
-            Arm64Mnemonic.FCMGT or Arm64Mnemonic.FCMLT or Arm64Mnemonic.FABS or Arm64Mnemonic.FNEG or Arm64Mnemonic.FCVTZS => FloatingArrangement(q, size, true),
-            _ => IntegerArrangement(q, 8 << (int)size),
-        };
-        var comparison = mnemonic is Arm64Mnemonic.CMLT or Arm64Mnemonic.FCMGT or Arm64Mnemonic.FCMLT;
-        var hasZero = mnemonic is Arm64Mnemonic.CMLT or Arm64Mnemonic.FCMGT or Arm64Mnemonic.FCMLT;
-
-        return new()
+        var insn = new Arm64Instruction
         {
             Mnemonic = mnemonic,
-            MnemonicCategory = comparison ? Arm64MnemonicCategory.SimdComparison : Arm64MnemonicCategory.SimdVectorMath,
+            MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
             Op0Kind = Arm64OperandKind.Register,
             Op1Kind = Arm64OperandKind.Register,
-            Op2Kind = hasZero ? mnemonic == Arm64Mnemonic.CMLT ? Arm64OperandKind.Immediate : Arm64OperandKind.FloatingPointImmediate : Arm64OperandKind.None,
             Op0Reg = Arm64Register.V0 + rd,
             Op1Reg = Arm64Register.V0 + rn,
-            Op0Arrangement = arrangement,
-            Op1Arrangement = arrangement,
-            Op2Imm = 0,
-            Op2FpImm = 0,
         };
+
+        switch (mnemonic)
+        {
+            //Integer unary ops and compares vs #0: same arrangement on both sides
+            case Arm64Mnemonic.REV64:
+            case Arm64Mnemonic.REV32:
+            case Arm64Mnemonic.REV16:
+            case Arm64Mnemonic.SUQADD:
+            case Arm64Mnemonic.CLS:
+            case Arm64Mnemonic.CNT:
+            case Arm64Mnemonic.USQADD:
+            case Arm64Mnemonic.CLZ:
+            case Arm64Mnemonic.SQABS:
+            case Arm64Mnemonic.SQNEG:
+            case Arm64Mnemonic.ABS:
+            case Arm64Mnemonic.NEG:
+            case Arm64Mnemonic.CMGT:
+            case Arm64Mnemonic.CMEQ:
+            case Arm64Mnemonic.CMLT:
+            case Arm64Mnemonic.CMGE:
+            case Arm64Mnemonic.CMLE:
+            case Arm64Mnemonic.MVN:
+            case Arm64Mnemonic.RBIT:
+            {
+                //MVN and RBIT always operate on byte elements
+                var arrangement = mnemonic is Arm64Mnemonic.MVN or Arm64Mnemonic.RBIT
+                    ? IntegerArrangement(q, 8)
+                    : IntegerArrangement(q, 8 << (int)size);
+                insn.Op0Arrangement = arrangement;
+                insn.Op1Arrangement = arrangement;
+                break;
+            }
+            //Floating-point ops: sz selects s or d elements
+            case Arm64Mnemonic.FCMGT:
+            case Arm64Mnemonic.FCMEQ:
+            case Arm64Mnemonic.FCMLT:
+            case Arm64Mnemonic.FCMGE:
+            case Arm64Mnemonic.FCMLE:
+            case Arm64Mnemonic.FABS:
+            case Arm64Mnemonic.FNEG:
+            case Arm64Mnemonic.FRINTN:
+            case Arm64Mnemonic.FRINTP:
+            case Arm64Mnemonic.FRINTM:
+            case Arm64Mnemonic.FRINTZ:
+            case Arm64Mnemonic.FRINTA:
+            case Arm64Mnemonic.FRINTX:
+            case Arm64Mnemonic.FRINTI:
+            case Arm64Mnemonic.FRINT32Z:
+            case Arm64Mnemonic.FRINT64Z:
+            case Arm64Mnemonic.FRINT32X:
+            case Arm64Mnemonic.FRINT64X:
+            case Arm64Mnemonic.FCVTNS:
+            case Arm64Mnemonic.FCVTPS:
+            case Arm64Mnemonic.FCVTMS:
+            case Arm64Mnemonic.FCVTZS:
+            case Arm64Mnemonic.FCVTNU:
+            case Arm64Mnemonic.FCVTPU:
+            case Arm64Mnemonic.FCVTMU:
+            case Arm64Mnemonic.FCVTZU:
+            case Arm64Mnemonic.FCVTAS:
+            case Arm64Mnemonic.FCVTAU:
+            case Arm64Mnemonic.SCVTF:
+            case Arm64Mnemonic.UCVTF:
+            case Arm64Mnemonic.FRECPE:
+            case Arm64Mnemonic.FRSQRTE:
+            case Arm64Mnemonic.URECPE:
+            case Arm64Mnemonic.URSQRTE:
+            case Arm64Mnemonic.FSQRT:
+            {
+                var arrangement = sz switch
+                {
+                    0 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                    _ when q => Arm64ArrangementSpecifier.TwoD,
+                    _ => throw new Arm64UndefinedInstructionException("Advanced SIMD two-register misc: 1d floating-point arrangement is reserved"),
+                };
+                insn.Op0Arrangement = arrangement;
+                insn.Op1Arrangement = arrangement;
+                break;
+            }
+            //Pairwise-add lengthening: source is the narrow arrangement, destination is wider
+            case Arm64Mnemonic.SADDLP:
+            case Arm64Mnemonic.UADDLP:
+            case Arm64Mnemonic.SADALP:
+            case Arm64Mnemonic.UADALP:
+            {
+                insn.Op1Arrangement = IntegerArrangement(q, 8 << (int)size);
+                insn.Op0Arrangement = size switch
+                {
+                    0b00 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
+                    0b01 => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                    _ => q ? Arm64ArrangementSpecifier.TwoD : Arm64ArrangementSpecifier.OneD,
+                };
+                break;
+            }
+            //Narrowing converts: source is always the wide full-width arrangement
+            case Arm64Mnemonic.XTN:
+            case Arm64Mnemonic.XTN2:
+            case Arm64Mnemonic.SQXTN:
+            case Arm64Mnemonic.SQXTN2:
+            case Arm64Mnemonic.SQXTUN:
+            case Arm64Mnemonic.SQXTUN2:
+            case Arm64Mnemonic.UQXTN:
+            case Arm64Mnemonic.UQXTN2:
+            {
+                insn.Op1Arrangement = size switch
+                {
+                    0b00 => Arm64ArrangementSpecifier.EightH,
+                    0b01 => Arm64ArrangementSpecifier.FourS,
+                    _ => Arm64ArrangementSpecifier.TwoD,
+                };
+                insn.Op0Arrangement = size switch
+                {
+                    0b00 => q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB,
+                    0b01 => q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH,
+                    _ => q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS,
+                };
+                break;
+            }
+            //SHLL: destination is the full-width wide arrangement, shift is implicit
+            case Arm64Mnemonic.SHLL:
+            case Arm64Mnemonic.SHLL2:
+            {
+                insn.Op0Arrangement = size switch
+                {
+                    0b00 => Arm64ArrangementSpecifier.EightH,
+                    0b01 => Arm64ArrangementSpecifier.FourS,
+                    _ => Arm64ArrangementSpecifier.TwoD,
+                };
+                insn.Op1Arrangement = IntegerArrangement(q, 8 << (int)size);
+                insn.Op2Kind = Arm64OperandKind.Immediate;
+                insn.Op2Imm = 8 << (int)size;
+                break;
+            }
+            //FCVTN/BFCVTN: size 0 => 4h|8h <- 4s, size 1 => 2s|4s <- 2d (FCVTXN only has the size 1 form)
+            case Arm64Mnemonic.FCVTN:
+            case Arm64Mnemonic.FCVTN2:
+            case Arm64Mnemonic.BFCVTN:
+            case Arm64Mnemonic.BFCVTN2:
+            case Arm64Mnemonic.FCVTXN:
+            case Arm64Mnemonic.FCVTXN2:
+            {
+                insn.Op0Arrangement = sz == 1
+                    ? q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS
+                    : q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH;
+                insn.Op1Arrangement = sz == 1 ? Arm64ArrangementSpecifier.TwoD : Arm64ArrangementSpecifier.FourS;
+                break;
+            }
+            //FCVTL: size 0 => 4s <- 4h|8h, size 1 => 2d <- 2s|4s
+            case Arm64Mnemonic.FCVTL:
+            case Arm64Mnemonic.FCVTL2:
+            {
+                insn.Op0Arrangement = sz == 1 ? Arm64ArrangementSpecifier.TwoD : Arm64ArrangementSpecifier.FourS;
+                insn.Op1Arrangement = sz == 1
+                    ? q ? Arm64ArrangementSpecifier.FourS : Arm64ArrangementSpecifier.TwoS
+                    : q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH;
+                break;
+            }
+            //FP8/BF16 lengthening converts: 8h destination from a byte source
+            case Arm64Mnemonic.F1CVTL:
+            case Arm64Mnemonic.F1CVTL2:
+            case Arm64Mnemonic.F2CVTL:
+            case Arm64Mnemonic.F2CVTL2:
+            case Arm64Mnemonic.BF1CVTL:
+            case Arm64Mnemonic.BF1CVTL2:
+            case Arm64Mnemonic.BF2CVTL:
+            case Arm64Mnemonic.BF2CVTL2:
+            {
+                insn.Op0Arrangement = Arm64ArrangementSpecifier.EightH;
+                insn.Op1Arrangement = q ? Arm64ArrangementSpecifier.SixteenB : Arm64ArrangementSpecifier.EightB;
+                break;
+            }
+        }
+
+        //Compares against zero take an immediate third operand
+        if (mnemonic is Arm64Mnemonic.CMGT or Arm64Mnemonic.CMEQ or Arm64Mnemonic.CMLT
+            or Arm64Mnemonic.CMGE or Arm64Mnemonic.CMLE)
+        {
+            insn.Op2Kind = Arm64OperandKind.Immediate;
+            insn.Op2Imm = 0;
+            insn.MnemonicCategory = Arm64MnemonicCategory.SimdComparison;
+        }
+        else if (mnemonic is Arm64Mnemonic.FCMGT or Arm64Mnemonic.FCMEQ or Arm64Mnemonic.FCMLT
+            or Arm64Mnemonic.FCMGE or Arm64Mnemonic.FCMLE)
+        {
+            insn.Op2Kind = Arm64OperandKind.FloatingPointImmediate;
+            insn.Op2FpImm = 0;
+            insn.MnemonicCategory = Arm64MnemonicCategory.SimdComparison;
+        }
+
+        return insn;
     }
 
     private static Arm64Instruction AdvancedSimdAcrossLanes(uint instruction)
@@ -765,31 +1150,75 @@ internal static class Arm64NonScalarAdvancedSimd
         var rn = (int)(instruction >> 5) & 0b1_1111;
         var rd = (int)instruction & 0b1_1111;
 
-        if (u && opcode == 0b01010 && size < 0b11)
+        if (size == 0b11)
+            throw new Arm64UndefinedInstructionException("Advanced SIMD across-lanes: size 0b11 is reserved");
+
+        var a = (int)(size >> 1); //variant selector for the floating-point ops
+
+        var mnemonic = (u, opcode) switch
         {
-            var scalarBase = size switch
+            (false, 0b00011) when size != 0b11 => Arm64Mnemonic.SADDLV,
+            (true, 0b00011) when size != 0b11 => Arm64Mnemonic.UADDLV,
+            (false, 0b01010) => Arm64Mnemonic.SMAXV,
+            (true, 0b01010) => Arm64Mnemonic.UMAXV,
+            (false, 0b11010) => Arm64Mnemonic.SMINV,
+            (true, 0b11010) => Arm64Mnemonic.UMINV,
+            (false, 0b11011) => Arm64Mnemonic.ADDV,
+            //Floating-point: U selects fp16 (4h/8h source) vs fp32 (4s source), a selects MAX vs MIN
+            (false, 0b01100) when size == 0b00 => Arm64Mnemonic.FMAXNMV,
+            (false, 0b01100) when size == 0b10 => Arm64Mnemonic.FMINNMV,
+            (false, 0b01111) when size == 0b00 => Arm64Mnemonic.FMAXV,
+            (false, 0b01111) when size == 0b10 => Arm64Mnemonic.FMINV,
+            (true, 0b01100) when size == 0b00 && q => Arm64Mnemonic.FMAXNMV,
+            (true, 0b01100) when size == 0b10 && q => Arm64Mnemonic.FMINNMV,
+            (true, 0b01111) when size == 0b00 && q => Arm64Mnemonic.FMAXV,
+            (true, 0b01111) when size == 0b10 && q => Arm64Mnemonic.FMINV,
+            _ => throw new Arm64UndefinedInstructionException($"Advanced SIMD across-lanes: unallocated U={u} opcode 0x{opcode:X}"),
+        };
+
+        //size 0b10 (single-element columns) requires the 4s source arrangement
+        if (size == 0b10 && !q && mnemonic is not (Arm64Mnemonic.FMAXNMV or Arm64Mnemonic.FMINNMV or Arm64Mnemonic.FMAXV or Arm64Mnemonic.FMINV))
+            throw new Arm64UndefinedInstructionException("Advanced SIMD across-lanes: the s-element forms require Q == 1");
+
+        Arm64Register scalarBase;
+        if (mnemonic is Arm64Mnemonic.FMAXNMV or Arm64Mnemonic.FMINNMV or Arm64Mnemonic.FMAXV or Arm64Mnemonic.FMINV)
+        {
+            //u => fp16 reduces to an h scalar, !u handled above as fp16; u => fp32 reduces to an s scalar
+            scalarBase = u ? Arm64Register.S0 : Arm64Register.H0;
+        }
+        else if (mnemonic is Arm64Mnemonic.SADDLV or Arm64Mnemonic.UADDLV)
+        {
+            //the accumulator is one element wider than the source
+            scalarBase = size switch
+            {
+                0b00 => Arm64Register.H0,
+                0b01 => Arm64Register.S0,
+                _ => Arm64Register.D0,
+            };
+        }
+        else
+        {
+            scalarBase = size switch
             {
                 0b00 => Arm64Register.B0,
                 0b01 => Arm64Register.H0,
-                0b10 => Arm64Register.S0,
-                _ => throw new Arm64UndefinedInstructionException("Advanced SIMD UMAXV: invalid element width"),
-            };
-            return new()
-            {
-                Mnemonic = Arm64Mnemonic.UMAXV,
-                MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
-                Op0Kind = Arm64OperandKind.Register,
-                Op1Kind = Arm64OperandKind.Register,
-                Op0Reg = scalarBase + rd,
-                Op1Reg = Arm64Register.V0 + rn,
-                Op1Arrangement = IntegerArrangement(q, 8 << (int)size),
+                _ => Arm64Register.S0,
             };
         }
 
+        var srcArrangement = mnemonic is Arm64Mnemonic.FMAXNMV or Arm64Mnemonic.FMINNMV or Arm64Mnemonic.FMAXV or Arm64Mnemonic.FMINV
+            ? u ? Arm64ArrangementSpecifier.FourS : q ? Arm64ArrangementSpecifier.EightH : Arm64ArrangementSpecifier.FourH
+            : IntegerArrangement(q, 8 << (int)size);
+
         return new()
         {
-            Mnemonic = Arm64Mnemonic.UNIMPLEMENTED,
-            MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath, 
+            Mnemonic = mnemonic,
+            MnemonicCategory = Arm64MnemonicCategory.SimdVectorMath,
+            Op0Kind = Arm64OperandKind.Register,
+            Op1Kind = Arm64OperandKind.Register,
+            Op0Reg = scalarBase + rd,
+            Op1Reg = Arm64Register.V0 + rn,
+            Op1Arrangement = srcArrangement,
         };
     }
 
